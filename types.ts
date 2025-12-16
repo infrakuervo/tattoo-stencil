@@ -1,7 +1,8 @@
 export enum StencilMode {
   AI_PRO = 'AI_PRO',         // Topográfico estándar (Líneas + Puntos)
-  AI_PRECISION = 'AI_PRECISION', // Nuevo: Topográfico Estricto (Isolíneas densas)
-  AI_SKETCH = 'AI_SKETCH'    // Artístico
+  AI_PRECISION = 'AI_PRECISION', // Topográfico Estricto (Isolíneas densas)
+  AI_SKETCH = 'AI_SKETCH',    // Artístico
+  AI_MASTER = 'AI_MASTER'     // Nuevo: Inteligente / Adaptativo
 }
 
 export interface FilterSettings {

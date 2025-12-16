@@ -11,9 +11,14 @@ import {
   ScanLine,
   ZoomIn,
   ZoomOut,
-  Crosshair, // Icon for precision
+  Crosshair, 
   Maximize2,
-  X
+  X,
+  Crown, 
+  Hand,
+  Layers,
+  ImagePlus,
+  Move
 } from 'lucide-react';
 import { FilterSettings, DEFAULT_SETTINGS, StencilMode } from '../types';
 import { processImage } from '../utils/imageProcessing';
@@ -23,24 +28,51 @@ interface EditorProps {
   onClose: () => void;
 }
 
+interface LayerTransform {
+    x: number; // Percentage -50 to 50
+    y: number; // Percentage -50 to 50
+    scale: number; // 0.1 to 3
+    rotation: number; // 0 to 360
+    opacity: number; // 0 to 1
+}
+
+const DEFAULT_LAYER_TRANSFORM: LayerTransform = {
+    x: 0,
+    y: 0,
+    scale: 0.5,
+    rotation: 0,
+    opacity: 0.8
+};
+
 const Editor: React.FC<EditorProps> = ({ imageSrc, onClose }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const layerInputRef = useRef<HTMLInputElement>(null);
   
   // State
   const [originalImage, setOriginalImage] = useState<HTMLImageElement | null>(null);
-  const [processedImage, setProcessedImage] = useState<HTMLImageElement | null>(null); // The result from AI
+  const [processedImage, setProcessedImage] = useState<HTMLImageElement | null>(null);
+  
+  // Layer State
+  const [secondImage, setSecondImage] = useState<HTMLImageElement | null>(null);
+  const [layerTransform, setLayerTransform] = useState<LayerTransform>(DEFAULT_LAYER_TRANSFORM);
   
   const [settings, setSettings] = useState<FilterSettings>(DEFAULT_SETTINGS);
   const [scale, setScale] = useState(1);
   const [isAiLoading, setIsAiLoading] = useState(false);
   const [activeMode, setActiveMode] = useState<StencilMode | null>(null);
   
+  // Pan / Drag State for Viewport
+  const [isDragging, setIsDragging] = useState(false);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
+
   // Full Screen State
   const [isFullScreen, setIsFullScreen] = useState(false);
   const [fullScreenSrc, setFullScreenSrc] = useState<string | null>(null);
   const [fullScreenScale, setFullScreenScale] = useState(1);
 
-  // Initialize
+  // Initialize Base Image
   useEffect(() => {
     const img = new Image();
     img.src = imageSrc;
@@ -50,17 +82,17 @@ const Editor: React.FC<EditorProps> = ({ imageSrc, onClose }) => {
     };
   }, [imageSrc]);
 
-  // Handle re-rendering of canvas
+  // Handle re-rendering of processed canvas
   useEffect(() => {
     if (processedImage) {
         const timeoutId = setTimeout(() => {
-            renderCanvas(processedImage, settings);
+            renderResultCanvas(processedImage, settings);
         }, 10);
         return () => clearTimeout(timeoutId);
     }
   }, [settings, processedImage]);
 
-  const renderCanvas = (img: HTMLImageElement, currentSettings: FilterSettings) => {
+  const renderResultCanvas = (img: HTMLImageElement, currentSettings: FilterSettings) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
@@ -77,6 +109,28 @@ const Editor: React.FC<EditorProps> = ({ imageSrc, onClose }) => {
   const updateSetting = (key: keyof FilterSettings, value: any) => {
     setSettings(prev => ({ ...prev, [key]: value }));
   };
+  
+  const updateLayerTransform = (key: keyof LayerTransform, value: number) => {
+    setLayerTransform(prev => ({ ...prev, [key]: value }));
+  };
+
+  const handleLayerUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+      if (e.target.files && e.target.files[0]) {
+          const file = e.target.files[0];
+          const reader = new FileReader();
+          reader.onload = (event) => {
+              const img = new Image();
+              img.onload = () => setSecondImage(img);
+              img.src = event.target?.result as string;
+          };
+          reader.readAsDataURL(file);
+      }
+  };
+
+  const removeLayer = () => {
+      setSecondImage(null);
+      setLayerTransform(DEFAULT_LAYER_TRANSFORM);
+  };
 
   const handleDownload = () => {
     const canvas = canvasRef.current;
@@ -90,19 +144,79 @@ const Editor: React.FC<EditorProps> = ({ imageSrc, onClose }) => {
 
   const toggleFullScreen = () => {
     if (!isFullScreen) {
-      // Enter full screen
       if (canvasRef.current) {
         setFullScreenSrc(canvasRef.current.toDataURL('image/png'));
         setIsFullScreen(true);
-        setFullScreenScale(1); // Reset zoom on open
+        setFullScreenScale(1); 
       }
     } else {
-      // Exit full screen
       setIsFullScreen(false);
       setFullScreenSrc(null);
     }
   };
 
+  // --- PANNING LOGIC ---
+  const handleMouseDown = (e: React.MouseEvent) => {
+    // Only pan if we aren't interacting with a control overlay (if any)
+    e.preventDefault();
+    setIsDragging(true);
+    setDragStart({ x: e.clientX - pan.x, y: e.clientY - pan.y });
+  };
+
+  const handleMouseMove = (e: React.MouseEvent) => {
+    if (!isDragging) return;
+    e.preventDefault();
+    setPan({
+      x: e.clientX - dragStart.x,
+      y: e.clientY - dragStart.y
+    });
+  };
+
+  const handleMouseUp = () => {
+    setIsDragging(false);
+  };
+
+  // --- COMPOSITION HELPER ---
+  // Draws the base image and the second layer onto a temporary canvas
+  // to create the composite image sent to the AI.
+  const getCompositeDataUrl = (): string => {
+      if (!originalImage) return '';
+      
+      const canvas = document.createElement('canvas');
+      canvas.width = originalImage.width;
+      canvas.height = originalImage.height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return '';
+
+      // 1. Draw Base
+      ctx.drawImage(originalImage, 0, 0);
+
+      // 2. Draw Layer if exists
+      if (secondImage) {
+          ctx.save();
+          // Calculate center
+          const cx = canvas.width / 2;
+          const cy = canvas.height / 2;
+          
+          // Move to center + offset
+          // Offset is percentage of base dimensions
+          const offsetX = (layerTransform.x / 100) * canvas.width;
+          const offsetY = (layerTransform.y / 100) * canvas.height;
+          
+          ctx.translate(cx + offsetX, cy + offsetY);
+          ctx.rotate((layerTransform.rotation * Math.PI) / 180);
+          ctx.scale(layerTransform.scale, layerTransform.scale);
+          ctx.globalAlpha = layerTransform.opacity;
+          
+          // Draw centered around origin
+          ctx.drawImage(secondImage, -secondImage.width / 2, -secondImage.height / 2);
+          ctx.restore();
+      }
+
+      return canvas.toDataURL('image/jpeg', 0.9); // High quality for AI
+  };
+
+  // --- AI GENERATION ---
   const generateAI = async (mode: StencilMode) => {
     if (!originalImage || isAiLoading) return;
     if (!process.env.API_KEY) {
@@ -114,19 +228,37 @@ const Editor: React.FC<EditorProps> = ({ imageSrc, onClose }) => {
     setActiveMode(mode);
 
     try {
-        const tempCanvas = document.createElement('canvas');
-        tempCanvas.width = originalImage.width;
-        tempCanvas.height = originalImage.height;
-        const ctx = tempCanvas.getContext('2d');
-        if (!ctx) throw new Error("Error de contexto");
-        
-        ctx.drawImage(originalImage, 0, 0);
-        const base64Data = tempCanvas.toDataURL('image/jpeg', 0.8).split(',')[1];
+        // GET COMPOSITE IMAGE
+        const dataUrl = getCompositeDataUrl();
+        const base64Data = dataUrl.split(',')[1];
 
         // --- PROMPT ENGINEERING ---
         let prompt = "";
         
-        if (mode === StencilMode.AI_PRO) {
+        if (mode === StencilMode.AI_MASTER) {
+            prompt = `
+              Eres un "Grand Master Tattoo Artist" con 30 años de experiencia.
+              Tu tarea: Analizar esta imagen y crear el STENCIL DEFINITIVO.
+              
+              ANÁLISIS INTELIGENTE:
+              1. Observa la imagen (puede ser una composición de varias fotos).
+              2. Decide la mejor técnica basada en la imagen:
+                 - Si es realista: Usa un híbrido de líneas finas y micropuntos.
+                 - Si es neotradicional: Usa líneas de contorno gruesas y sólidas.
+                 - Si es geométrica: Usa precisión matemática.
+              
+              TU OBJETIVO "MASTER":
+              Genera una versión "Evolucionada" del stencil. No te limites a copiar contornos.
+              Interpreta los volúmenes. Convierte sombras confusas en tramas de diseño claras.
+              Haz que el diseño se vea "Listo para tatuar" y estéticamente superior.
+              
+              REGLAS DE SALIDA:
+              - Fondo: Blanco Puro.
+              - Tinta: Negra.
+              - Estilo: Limpio, legible, artístico y OPTIMIZADO para la piel.
+            `;
+        }
+        else if (mode === StencilMode.AI_PRO) {
             prompt = `
               Genera un STENCIL DE TATUAJE PROFESIONAL.
               Estilo: Mapa Topográfico Limpio.
@@ -188,6 +320,7 @@ const Editor: React.FC<EditorProps> = ({ imageSrc, onClose }) => {
             const img = new Image();
             img.onload = () => {
                 setProcessedImage(img);
+                // We keep current settings or reset? Let's reset for fresh result
                 setSettings({ ...DEFAULT_SETTINGS });
             };
             img.src = newImageUrl;
@@ -256,6 +389,7 @@ const Editor: React.FC<EditorProps> = ({ imageSrc, onClose }) => {
          </div>
 
          <div className="text-sm font-bold text-zinc-200 hidden md:block">
+            {activeMode === StencilMode.AI_MASTER && <span className="text-amber-400 flex items-center gap-2"><Crown className="w-4 h-4" /> Modo Master AI</span>}
             {activeMode === StencilMode.AI_PRO && 'Modo: Pro (Líneas + Puntos)'}
             {activeMode === StencilMode.AI_PRECISION && 'Modo: Topográfico Estricto'}
             {activeMode === StencilMode.AI_SKETCH && 'Modo: Sketch Lápiz'}
@@ -273,40 +407,92 @@ const Editor: React.FC<EditorProps> = ({ imageSrc, onClose }) => {
 
       <div className="flex-1 flex flex-col md:flex-row overflow-hidden">
           
-          {/* LEFT: Work Area (Split View) */}
-          <div className="flex-1 bg-[#121214] relative overflow-auto custom-pattern flex items-center justify-center p-8">
+          {/* LEFT: Work Area (Split View with PANNING) */}
+          <div 
+            ref={containerRef}
+            className={`
+                flex-1 bg-[#121214] relative overflow-hidden custom-pattern flex items-center justify-center p-8
+                ${isDragging ? 'cursor-grabbing' : 'cursor-grab'}
+            `}
+            onMouseDown={handleMouseDown}
+            onMouseMove={handleMouseMove}
+            onMouseUp={handleMouseUp}
+            onMouseLeave={handleMouseUp}
+          >
+             
+             {/* Hint for user about panning */}
+             <div className="absolute top-4 left-4 z-10 pointer-events-none opacity-50 flex items-center gap-2 text-xs text-zinc-500">
+                <Hand className="w-3 h-3" />
+                <span>Click y arrastra para mover</span>
+             </div>
+
              <div 
-                className="flex gap-4 transition-transform duration-200 ease-out origin-center"
-                style={{ transform: `scale(${scale})` }}
+                className="flex gap-4 transition-transform duration-75 ease-out origin-center will-change-transform"
+                style={{ 
+                    transform: `translate(${pan.x}px, ${pan.y}px) scale(${scale})` 
+                }}
              >
-                {/* Original Image */}
+                {/* Original Composition View */}
                 {originalImage && (
-                    <div className="relative shadow-2xl group">
-                        <div className="absolute -top-8 left-0 text-xs font-bold text-zinc-500 uppercase tracking-widest">Original</div>
-                        <img 
-                            src={originalImage.src} 
-                            alt="Original" 
-                            className="max-h-[70vh] w-auto border border-zinc-700 bg-zinc-800 object-contain"
-                        />
+                    <div className="relative shadow-2xl group select-none">
+                        <div className="absolute -top-8 left-0 text-xs font-bold text-zinc-500 uppercase tracking-widest flex items-center gap-2">
+                           {secondImage ? 'Composición' : 'Original'}
+                           {secondImage && <span className="px-1.5 py-0.5 rounded bg-zinc-800 text-[10px] text-primary-400">2 Capas</span>}
+                        </div>
+                        
+                        {/* Base Image Container - Acts as the anchor */}
+                        <div className="relative border border-zinc-700 bg-zinc-800">
+                            {/* 1. Base Image */}
+                            <img 
+                                src={originalImage.src} 
+                                alt="Base" 
+                                className="max-h-[70vh] w-auto object-contain pointer-events-none"
+                            />
+
+                            {/* 2. Second Layer (Overlay) */}
+                            {secondImage && (
+                                <div 
+                                    className="absolute top-1/2 left-1/2 w-full h-full pointer-events-none flex items-center justify-center"
+                                    style={{
+                                        // We use a container that matches the base image size, then transform inside it
+                                        transform: `translate(-50%, -50%)`, 
+                                    }}
+                                >
+                                    <img 
+                                        src={secondImage.src}
+                                        alt="Layer 2"
+                                        style={{
+                                            transform: `
+                                                translate(${layerTransform.x}%, ${layerTransform.y}%) 
+                                                rotate(${layerTransform.rotation}deg) 
+                                                scale(${layerTransform.scale})
+                                            `,
+                                            opacity: layerTransform.opacity,
+                                        }}
+                                        className="origin-center"
+                                    />
+                                </div>
+                            )}
+                        </div>
                     </div>
                 )}
 
                 {/* Generated Stencil */}
                 {processedImage ? (
-                    <div className="relative shadow-2xl">
+                    <div className="relative shadow-2xl pointer-events-none select-none">
                          <div className="absolute -top-8 left-0 text-xs font-bold text-primary-500 uppercase tracking-widest flex items-center gap-2">
-                            <span>Stencil Generado</span>
+                            <span>Stencil Final</span>
                             <ScanLine className="w-3 h-3" />
                          </div>
                          <canvas 
                             ref={canvasRef}
-                            className="max-h-[70vh] w-auto border border-zinc-700 bg-white object-contain"
+                            className="max-h-[70vh] w-auto border border-zinc-700 bg-white object-contain pointer-events-none"
                          />
                     </div>
                 ) : (
-                    <div className="max-h-[70vh] aspect-[3/4] w-96 border-2 border-dashed border-zinc-800 rounded-lg flex flex-col items-center justify-center text-zinc-600 bg-zinc-900/50 p-6 text-center">
+                    <div className="max-h-[70vh] aspect-[3/4] w-96 border-2 border-dashed border-zinc-800 rounded-lg flex flex-col items-center justify-center text-zinc-600 bg-zinc-900/50 p-6 text-center select-none">
                         <Wand2 className="w-12 h-12 mb-4 opacity-20" />
-                        <p className="text-sm">Selecciona un estilo a la derecha para generar el stencil.</p>
+                        <p className="text-sm">Configura tu composición y selecciona un estilo.</p>
                     </div>
                 )}
              </div>
@@ -323,11 +509,137 @@ const Editor: React.FC<EditorProps> = ({ imageSrc, onClose }) => {
              </div>
 
              <div className="flex-1 overflow-y-auto p-4 space-y-6">
+
+                {/* --- LAYER CONTROL SECTION --- */}
+                <div className="space-y-3 bg-zinc-850 p-3 rounded-xl border border-zinc-800">
+                    <div className="flex items-center justify-between">
+                        <label className="text-xs font-bold text-zinc-400 uppercase flex items-center gap-2">
+                            <Layers className="w-3 h-3" /> Capas / Composición
+                        </label>
+                        {secondImage && (
+                            <button 
+                                onClick={removeLayer}
+                                className="text-[10px] text-red-400 hover:text-red-300 flex items-center gap-1"
+                            >
+                                <Trash2 className="w-3 h-3" /> Quitar capa
+                            </button>
+                        )}
+                    </div>
+
+                    {!secondImage ? (
+                        <div 
+                            onClick={() => layerInputRef.current?.click()}
+                            className="w-full h-16 border border-dashed border-zinc-700 rounded-lg flex items-center justify-center gap-2 text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800 cursor-pointer transition-colors"
+                        >
+                            <ImagePlus className="w-5 h-5" />
+                            <span className="text-xs">Añadir 2ª Imagen Referencia</span>
+                        </div>
+                    ) : (
+                        <div className="space-y-4 animate-fade-in">
+                            <div className="text-[10px] text-zinc-500 bg-zinc-900 p-2 rounded border border-zinc-800">
+                                Ajusta la segunda capa sobre la base. La IA combinará ambas para crear el stencil.
+                            </div>
+                            
+                            {/* Position Controls */}
+                            <div className="grid grid-cols-2 gap-3">
+                                <div className="space-y-1">
+                                    <span className="text-[10px] text-zinc-400">Posición X</span>
+                                    <input 
+                                        type="range" min="-50" max="50" step="1"
+                                        value={layerTransform.x}
+                                        onChange={(e) => updateLayerTransform('x', parseInt(e.target.value))}
+                                        className="w-full h-1 bg-zinc-700 rounded-lg accent-primary-500"
+                                    />
+                                </div>
+                                <div className="space-y-1">
+                                    <span className="text-[10px] text-zinc-400">Posición Y</span>
+                                    <input 
+                                        type="range" min="-50" max="50" step="1"
+                                        value={layerTransform.y}
+                                        onChange={(e) => updateLayerTransform('y', parseInt(e.target.value))}
+                                        className="w-full h-1 bg-zinc-700 rounded-lg accent-primary-500"
+                                    />
+                                </div>
+                            </div>
+
+                            {/* Scale & Rotation */}
+                            <div className="space-y-2">
+                                <div className="flex justify-between text-[10px] text-zinc-400">
+                                    <span>Escala ({Math.round(layerTransform.scale * 100)}%)</span>
+                                </div>
+                                <input 
+                                    type="range" min="0.1" max="2.0" step="0.05"
+                                    value={layerTransform.scale}
+                                    onChange={(e) => updateLayerTransform('scale', parseFloat(e.target.value))}
+                                    className="w-full h-1 bg-zinc-700 rounded-lg accent-primary-500"
+                                />
+                            </div>
+
+                            <div className="space-y-2">
+                                <div className="flex justify-between text-[10px] text-zinc-400">
+                                    <span>Rotación ({layerTransform.rotation}°)</span>
+                                </div>
+                                <input 
+                                    type="range" min="0" max="360" step="1"
+                                    value={layerTransform.rotation}
+                                    onChange={(e) => updateLayerTransform('rotation', parseInt(e.target.value))}
+                                    className="w-full h-1 bg-zinc-700 rounded-lg accent-primary-500"
+                                />
+                            </div>
+
+                             <div className="space-y-2">
+                                <div className="flex justify-between text-[10px] text-zinc-400">
+                                    <span>Opacidad ({Math.round(layerTransform.opacity * 100)}%)</span>
+                                </div>
+                                <input 
+                                    type="range" min="0.1" max="1" step="0.1"
+                                    value={layerTransform.opacity}
+                                    onChange={(e) => updateLayerTransform('opacity', parseFloat(e.target.value))}
+                                    className="w-full h-1 bg-zinc-700 rounded-lg accent-primary-500"
+                                />
+                            </div>
+                        </div>
+                    )}
+                    <input 
+                        type="file" 
+                        ref={layerInputRef} 
+                        onChange={handleLayerUpload} 
+                        className="hidden" 
+                        accept="image/*"
+                    />
+                </div>
                 
                 {/* AI Generators */}
                 <div className="space-y-3">
                     <label className="text-xs font-bold text-zinc-500 uppercase">Estilos de Stencil</label>
                     
+                    {/* BUTTON 0: MASTER (NEW) */}
+                    <button 
+                        onClick={() => generateAI(StencilMode.AI_MASTER)}
+                        disabled={isAiLoading}
+                        className={`w-full p-3 rounded-xl border flex items-center gap-3 transition-all text-left relative overflow-hidden group cursor-pointer
+                            ${activeMode === StencilMode.AI_MASTER
+                                ? 'bg-amber-950/30 border-amber-500 shadow-lg shadow-amber-900/20' 
+                                : 'bg-gradient-to-r from-amber-950/10 to-zinc-800/50 border-zinc-700 hover:border-amber-500/50 hover:bg-zinc-800'
+                            }
+                        `}
+                    >
+                        <div className="p-2 rounded-lg bg-zinc-900 text-amber-500 group-hover:scale-110 transition-transform shadow-inner shadow-amber-900/20">
+                            <Crown className="w-5 h-5" />
+                        </div>
+                        <div>
+                            <div className="font-bold text-sm text-amber-100">Master AI</div>
+                            <div className="text-[10px] text-amber-400/70 mt-0.5">Análisis Experto & Optimización</div>
+                        </div>
+                        {isAiLoading && activeMode === StencilMode.AI_MASTER && (
+                            <div className="absolute right-3 top-3">
+                                <Loader2 className="w-5 h-5 text-amber-500 animate-spin" />
+                            </div>
+                        )}
+                    </button>
+
+                    <div className="h-[1px] bg-zinc-800 my-2"></div>
+
                     {/* BUTTON 1: PRO */}
                     <button 
                         onClick={() => generateAI(StencilMode.AI_PRO)}
@@ -353,7 +665,7 @@ const Editor: React.FC<EditorProps> = ({ imageSrc, onClose }) => {
                         )}
                     </button>
 
-                    {/* BUTTON 2: PRECISION (NEW) */}
+                    {/* BUTTON 2: PRECISION */}
                     <button 
                         onClick={() => generateAI(StencilMode.AI_PRECISION)}
                         disabled={isAiLoading}
